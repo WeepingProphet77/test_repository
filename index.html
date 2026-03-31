@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DNA Helix :: Code Translation</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+  }
+  canvas { display: block; }
+  #code-panel {
+    position: fixed;
+    right: 0;
+    top: 0;
+    width: 340px;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    border-left: 1px solid rgba(0, 255, 170, 0.15);
+    padding: 20px 16px;
+    overflow: hidden;
+    z-index: 10;
+  }
+  #code-panel h2 {
+    color: rgba(0, 255, 170, 0.6);
+    font-size: 11px;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    border-bottom: 1px solid rgba(0, 255, 170, 0.1);
+    padding-bottom: 8px;
+  }
+  #code-output {
+    font-size: 12px;
+    line-height: 1.6;
+    color: #0fa;
+    white-space: pre-wrap;
+    word-break: break-all;
+    opacity: 0.9;
+  }
+  .dna-line { color: rgba(0, 180, 255, 0.7); }
+  .code-line { color: rgba(0, 255, 170, 0.9); }
+  .comment-line { color: rgba(100, 100, 120, 0.8); }
+  .keyword { color: rgba(200, 100, 255, 0.9); }
+  .separator {
+    display: block;
+    color: rgba(0, 255, 170, 0.15);
+    margin: 2px 0;
+    font-size: 10px;
+  }
+  #scan-line {
+    position: fixed;
+    left: 0;
+    width: calc(100% - 340px);
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(0,255,170,0.6), rgba(0,255,170,0.9), rgba(0,255,170,0.6), transparent);
+    box-shadow: 0 0 15px rgba(0,255,170,0.4), 0 0 30px rgba(0,255,170,0.2);
+    z-index: 5;
+    pointer-events: none;
+  }
+  #scan-label {
+    position: fixed;
+    left: 20px;
+    color: rgba(0, 255, 170, 0.5);
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    z-index: 6;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="helix"></canvas>
+<div id="scan-line"></div>
+<div id="scan-label">TRANSLATING SEQUENCE</div>
+<div id="code-panel">
+  <h2>Sequence Translation</h2>
+  <div id="code-output"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('helix');
+const ctx = canvas.getContext('2d');
+const codeOutput = document.getElementById('code-output');
+const scanLine = document.getElementById('scan-line');
+const scanLabel = document.getElementById('scan-label');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// DNA bases and codon-to-code mapping
+const BASES = ['A', 'T', 'G', 'C'];
+const COMPLEMENTS = { A: 'T', T: 'A', G: 'C', C: 'G' };
+const CODONS_TO_CODE = {
+  ATG: '<span class="keyword">function</span> init()',
+  TAC: '<span class="keyword">return</span> sequence;',
+  GCA: '<span class="keyword">let</span> helix = []',
+  CGT: '<span class="keyword">const</span> BASES = 4',
+  TGA: '  genome.decode(strand)',
+  ACT: '  ribosomes.translate()',
+  GAC: '<span class="keyword">if</span> (codon.isStart())',
+  CTG: '  protein.fold(shape)',
+  AGC: '<span class="keyword">for</span> (base <span class="keyword">in</span> chain)',
+  TCG: '  enzyme.splice(intron)',
+  ATC: '  nucleotide.bind(pair)',
+  TAG: '<span class="keyword">class</span> Chromosome {',
+  GCT: '  polymerase.copy(dna)',
+  CGA: '  helicase.unwind()',
+  TGC: '<span class="keyword">async</span> replicate(fork)',
+  ACG: '  promoter.activate(gene)',
+  GTA: '  membrane.transport()',
+  CAT: '<span class="keyword">yield</span> aminoAcid',
+  TAT: '  ribosome.read(mRNA)',
+  ATA: '  telomere.extend(cap)',
+  GGG: '  histone.wrap(chromatin)',
+  CCC: '<span class="keyword">export</span> { genome }',
+  AAA: '  mutation.repair(base)',
+  TTT: '  centromere.attach()',
+};
+const CODON_KEYS = Object.keys(CODONS_TO_CODE);
+
+// Generate a long DNA strand
+const strandLength = 600;
+const strand = [];
+for (let i = 0; i < strandLength; i++) {
+  strand.push(BASES[Math.floor(Math.random() * 4)]);
+}
+
+// Helix parameters
+const helixRadius = 120;
+const verticalSpacing = 14;
+const rotationSpeed = 0.012;
+const nucleotidesVisible = 42;
+let time = 0;
+
+// Scan line position
+let scanY = H * 0.5;
+const scanSpeed = 0.3;
+let scanDirection = 1;
+
+// Particles for ambient effect
+const particles = [];
+for (let i = 0; i < 60; i++) {
+  particles.push({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    vx: (Math.random() - 0.5) * 0.3,
+    vy: (Math.random() - 0.5) * 0.3,
+    size: Math.random() * 1.5 + 0.5,
+    alpha: Math.random() * 0.3,
+  });
+}
+
+// Code generation state
+let codeLines = [];
+const maxCodeLines = 32;
+let lastCodonIndex = -1;
+let codeTimer = 0;
+
+function getCodonCode(i) {
+  const idx = Math.floor(i / 3) * 3;
+  const codon = strand[idx % strandLength]
+    + strand[(idx + 1) % strandLength]
+    + strand[(idx + 2) % strandLength];
+  return CODONS_TO_CODE[codon] || CODONS_TO_CODE[CODON_KEYS[idx % CODON_KEYS.length]];
+}
+
+function addCodeLine(baseIndex) {
+  const idx = Math.floor(baseIndex / 3);
+  if (idx === lastCodonIndex) return;
+  lastCodonIndex = idx;
+
+  const ci = idx * 3;
+  const codon = strand[ci % strandLength]
+    + strand[(ci + 1) % strandLength]
+    + strand[(ci + 2) % strandLength];
+  const comp = codon.split('').map(b => COMPLEMENTS[b]).join('');
+  const code = getCodonCode(ci);
+
+  const dnaStr = `<span class="dna-line">${codon}|${comp}</span>`;
+  const arrow = `<span class="separator">  -> </span>`;
+  const codeLine = `<span class="code-line">${code}</span>`;
+
+  codeLines.push(dnaStr + arrow + codeLine);
+  if (codeLines.length > maxCodeLines) codeLines.shift();
+
+  codeOutput.innerHTML = codeLines.join('\n');
+  codeOutput.scrollTop = codeOutput.scrollHeight;
+}
+
+// Light source for reflections
+const light = { x: W * 0.3, y: H * 0.2 };
+
+function drawHelixNode(x, y, z, base, isStrand2, isAtScan) {
+  const depthScale = (z + 1) / 2;
+  const size = 4 + depthScale * 4;
+
+  // Base colors
+  const colors = {
+    A: [0, 200, 255],
+    T: [255, 100, 200],
+    G: [0, 255, 170],
+    C: [200, 100, 255],
+  };
+  const col = colors[base] || [200, 200, 200];
+
+  // Light reflection
+  const dx = x - light.x;
+  const dy = y - light.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const lightIntensity = Math.max(0, 1 - dist / 600) * depthScale;
+  const specular = Math.pow(lightIntensity, 3) * 0.8;
+
+  const r = Math.min(255, col[0] + specular * 255);
+  const g = Math.min(255, col[1] + specular * 255);
+  const b = Math.min(255, col[2] + specular * 255);
+  const alpha = 0.4 + depthScale * 0.6;
+
+  // Glow
+  if (depthScale > 0.5) {
+    const glowSize = size * 3;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, glowSize);
+    glow.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},${0.15 * depthScale})`);
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(x - glowSize, y - glowSize, glowSize * 2, glowSize * 2);
+  }
+
+  // Node
+  ctx.beginPath();
+  ctx.arc(x, y, size, 0, Math.PI * 2);
+  const grad = ctx.createRadialGradient(x - size * 0.3, y - size * 0.3, 0, x, y, size);
+  grad.addColorStop(0, `rgba(${Math.min(255, r + 80)},${Math.min(255, g + 80)},${Math.min(255, b + 80)},${alpha})`);
+  grad.addColorStop(0.6, `rgba(${r | 0},${g | 0},${b | 0},${alpha})`);
+  grad.addColorStop(1, `rgba(${r * 0.3 | 0},${g * 0.3 | 0},${b * 0.3 | 0},${alpha * 0.8})`);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Specular highlight
+  if (specular > 0.1) {
+    ctx.beginPath();
+    ctx.arc(x - size * 0.25, y - size * 0.25, size * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${specular * 0.6})`;
+    ctx.fill();
+  }
+
+  // Bright flash when at scan line
+  if (isAtScan) {
+    ctx.beginPath();
+    ctx.arc(x, y, size * 2.5, 0, Math.PI * 2);
+    const flash = ctx.createRadialGradient(x, y, 0, x, y, size * 2.5);
+    flash.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},0.5)`);
+    flash.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = flash;
+    ctx.fill();
+  }
+}
+
+function render() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle background gradient
+  const bgGrad = ctx.createRadialGradient(W * 0.35, H * 0.5, 0, W * 0.35, H * 0.5, H);
+  bgGrad.addColorStop(0, 'rgba(0, 20, 40, 0.05)');
+  bgGrad.addColorStop(1, 'rgba(0, 0, 0, 0.1)');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Particles
+  for (const p of particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.x < 0) p.x = W;
+    if (p.x > W) p.x = 0;
+    if (p.y < 0) p.y = H;
+    if (p.y > H) p.y = 0;
+    p.alpha += (Math.random() - 0.5) * 0.02;
+    p.alpha = Math.max(0.05, Math.min(0.3, p.alpha));
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0, 255, 170, ${p.alpha})`;
+    ctx.fill();
+  }
+
+  const centerX = (W - 340) / 2;
+  const centerY = H / 2;
+  const startY = centerY - (nucleotidesVisible / 2) * verticalSpacing;
+
+  // Collect all drawable elements for depth sorting
+  const drawables = [];
+
+  for (let i = 0; i < nucleotidesVisible; i++) {
+    const baseIndex = i;
+    const angle = time + i * 0.3;
+    const y = startY + i * verticalSpacing;
+
+    // Strand 1
+    const x1 = centerX + Math.cos(angle) * helixRadius;
+    const z1 = Math.sin(angle);
+
+    // Strand 2 (180 degrees offset)
+    const x2 = centerX + Math.cos(angle + Math.PI) * helixRadius;
+    const z2 = Math.sin(angle + Math.PI);
+
+    const base1 = strand[baseIndex % strandLength];
+    const base2 = COMPLEMENTS[base1];
+
+    const isAtScan = Math.abs(y - scanY) < 10;
+
+    drawables.push({ type: 'bond', x1, x2, y, z: (z1 + z2) / 2, base1, base2, isAtScan });
+    drawables.push({ type: 'node', x: x1, y, z: z1, base: base1, strand: 1, isAtScan });
+    drawables.push({ type: 'node', x: x2, y, z: z2, base: base2, strand: 2, isAtScan });
+
+    // Trigger code translation at scan line
+    if (isAtScan) {
+      addCodeLine(baseIndex);
+    }
+  }
+
+  // Sort by depth (draw far objects first)
+  drawables.sort((a, b) => a.z - b.z);
+
+  for (const d of drawables) {
+    if (d.type === 'bond') {
+      // Hydrogen bond between base pairs
+      const depthScale = (d.z + 1) / 2;
+      const alpha = 0.05 + depthScale * 0.15;
+
+      // Draw dashed bond line
+      ctx.beginPath();
+      ctx.setLineDash([3, 4]);
+      ctx.moveTo(d.x1, d.y);
+      ctx.lineTo(d.x2, d.y);
+
+      if (d.isAtScan) {
+        ctx.strokeStyle = `rgba(0, 255, 170, ${alpha * 3})`;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = 'rgba(0,255,170,0.3)';
+        ctx.shadowBlur = 8;
+      } else {
+        ctx.strokeStyle = `rgba(80, 120, 200, ${alpha})`;
+        ctx.lineWidth = 1;
+        ctx.shadowBlur = 0;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+
+      // Base pair labels in the middle
+      if (depthScale > 0.4) {
+        const mx = (d.x1 + d.x2) / 2;
+        ctx.font = `${8 + depthScale * 3}px Courier New`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const labelAlpha = d.isAtScan ? 0.9 : 0.15 + depthScale * 0.25;
+        ctx.fillStyle = d.isAtScan
+          ? `rgba(0, 255, 170, ${labelAlpha})`
+          : `rgba(150, 180, 220, ${labelAlpha})`;
+        ctx.fillText(`${d.base1}-${d.base2}`, mx, d.y);
+      }
+    } else {
+      drawHelixNode(d.x, d.y, d.z, d.base, d.strand === 2, d.isAtScan);
+    }
+  }
+
+  // Phosphate backbone curves
+  for (let s = 0; s < 2; s++) {
+    ctx.beginPath();
+    for (let i = 0; i < nucleotidesVisible; i++) {
+      const angle = time + i * 0.3 + s * Math.PI;
+      const x = centerX + Math.cos(angle) * helixRadius;
+      const y = startY + i * verticalSpacing;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = s === 0
+      ? 'rgba(0, 150, 255, 0.08)'
+      : 'rgba(200, 80, 255, 0.08)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Update scan line
+  scanY += scanSpeed * scanDirection;
+  if (scanY > startY + nucleotidesVisible * verticalSpacing + 20) {
+    scanDirection = -1;
+  } else if (scanY < startY - 20) {
+    scanDirection = 1;
+  }
+  scanLine.style.top = scanY + 'px';
+  scanLabel.style.top = (scanY - 16) + 'px';
+
+  // Update light position slowly
+  light.x = (W - 340) * 0.3 + Math.sin(time * 0.5) * 100;
+  light.y = H * 0.2 + Math.cos(time * 0.3) * 80;
+
+  time += rotationSpeed;
+  requestAnimationFrame(render);
+}
+
+// Clear canvas fully on first frame
+ctx.fillStyle = '#000';
+ctx.fillRect(0, 0, W, H);
+
+render();
+</script>
+</body>
+</html>
