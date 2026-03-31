@@ -6,30 +6,20 @@
 <title>DNA Helix :: Holographic</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #000;
-    overflow: hidden;
-    font-family: 'Courier New', monospace;
-  }
-  canvas { display: block; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; position: fixed; top: 0; left: 0; }
 </style>
 </head>
 <body>
 <canvas id="helix"></canvas>
-
 <script>
 const canvas = document.getElementById('helix');
 const ctx = canvas.getContext('2d');
-
 let W, H;
-function resize() {
-  W = canvas.width = window.innerWidth;
-  H = canvas.height = window.innerHeight;
-}
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
 resize();
 window.addEventListener('resize', resize);
 
-// DNA bases and codon-to-code mapping
 const BASES = ['A', 'T', 'G', 'C'];
 const COMPLEMENTS = { A: 'T', T: 'A', G: 'C', C: 'G' };
 const CODE_SNIPPETS = [
@@ -67,161 +57,296 @@ const CODE_SNIPPETS = [
   { kw: '', code: '  codon.lookup(table)' },
 ];
 
-// Generate DNA strand
-const strandLength = 600;
-const strand = [];
-for (let i = 0; i < strandLength; i++) {
-  strand.push(BASES[Math.floor(Math.random() * 4)]);
+function hsl(h, s, l, a) { return `hsla(${h},${s}%,${l}%,${a})`; }
+function holoHue(angle, depth, t) { return (angle * 30 + t * 40 + depth * 60) % 360; }
+
+// Generate a random DNA strand
+function makeStrand(len) {
+  const s = [];
+  for (let i = 0; i < len; i++) s.push(BASES[Math.floor(Math.random() * 4)]);
+  return s;
 }
 
-// Helix parameters
-const helixRadius = 130;
-const verticalSpacing = 14;
-const rotationSpeed = 0.012;
-const nucleotidesVisible = 42;
-let time = 0;
+// ── Helix definition ──
+// Each helix has its own position, size, speed, strand data, scan state, and code lines
+function createHelix(cfg) {
+  const strand = makeStrand(600);
+  return {
+    cx: cfg.cx,               // center x (fraction of W)
+    cy: cfg.cy || 0.5,        // center y (fraction of H)
+    radius: cfg.radius,
+    vSpacing: cfg.vSpacing,
+    nodeCount: cfg.nodeCount,
+    rotSpeed: cfg.rotSpeed,
+    scale: cfg.scale || 1,    // overall visual scale (opacity, size)
+    depth: cfg.depth || 0,    // layer depth 0=front
+    hueOffset: cfg.hueOffset || 0,
+    strand,
+    time: Math.random() * 100,
+    scanY: 0,
+    scanSpeed: cfg.scanSpeed || 0.35,
+    scanDir: 1,
+    codeLines: [],
+    codeTimer: 0,
+    codeInterval: cfg.codeInterval || 14,
+    lastCodonIdx: -1,
+  };
+}
 
-// Scan line
-let scanY = 0;
-const scanSpeed = 0.35;
-let scanDirection = 1;
+// Main foreground helix - big and centered
+const helices = [
+  createHelix({ cx: 0.5, radius: 140, vSpacing: 14, nodeCount: 46, rotSpeed: 0.012, scale: 1, depth: 0, hueOffset: 0, scanSpeed: 0.35, codeInterval: 12 }),
+  // Background helices - smaller, offset, dimmer
+  createHelix({ cx: 0.12, radius: 70, vSpacing: 10, nodeCount: 52, rotSpeed: 0.009, scale: 0.45, depth: 1, hueOffset: 120, scanSpeed: 0.25, codeInterval: 18 }),
+  createHelix({ cx: 0.88, radius: 65, vSpacing: 10, nodeCount: 50, rotSpeed: 0.010, scale: 0.4, depth: 1, hueOffset: 240, scanSpeed: 0.28, codeInterval: 20 }),
+  createHelix({ cx: 0.28, cy: 0.48, radius: 50, vSpacing: 8, nodeCount: 55, rotSpeed: 0.007, scale: 0.25, depth: 2, hueOffset: 60, scanSpeed: 0.18, codeInterval: 22 }),
+  createHelix({ cx: 0.73, cy: 0.52, radius: 55, vSpacing: 9, nodeCount: 48, rotSpeed: 0.008, scale: 0.28, depth: 2, hueOffset: 180, scanSpeed: 0.2, codeInterval: 24 }),
+  createHelix({ cx: 0.05, cy: 0.4, radius: 35, vSpacing: 7, nodeCount: 58, rotSpeed: 0.006, scale: 0.15, depth: 3, hueOffset: 300, scanSpeed: 0.14, codeInterval: 28 }),
+  createHelix({ cx: 0.95, cy: 0.6, radius: 38, vSpacing: 7, nodeCount: 56, rotSpeed: 0.0065, scale: 0.17, depth: 3, hueOffset: 30, scanSpeed: 0.15, codeInterval: 26 }),
+];
 
 // Particles
 const particles = [];
-for (let i = 0; i < 80; i++) {
+for (let i = 0; i < 120; i++) {
   particles.push({
-    x: Math.random() * 2000,
-    y: Math.random() * 2000,
-    vx: (Math.random() - 0.5) * 0.3,
-    vy: (Math.random() - 0.5) * 0.3,
-    size: Math.random() * 1.5 + 0.5,
-    alpha: Math.random() * 0.25,
+    x: Math.random() * 3000, y: Math.random() * 2000,
+    vx: (Math.random() - 0.5) * 0.4, vy: (Math.random() - 0.5) * 0.4,
+    size: Math.random() * 1.8 + 0.3, alpha: Math.random() * 0.2,
   });
 }
 
-// Code window state - 7 lines, constantly cycling
-const codeWindowLines = 7;
-let codeLines = [];
-let codeScrollTimer = 0;
-let codeScrollInterval = 12; // frames between new lines
-let lastCodonIndex = -1;
+const light = { x: 0, y: 0 };
+let globalTime = 0;
 
-function getNextCodeLine(baseIndex) {
+function getCodeLine(hlx, baseIndex) {
   const ci = Math.floor(baseIndex / 3) * 3;
-  const codon = strand[ci % strandLength]
-    + strand[(ci + 1) % strandLength]
-    + strand[(ci + 2) % strandLength];
+  const codon = hlx.strand[ci % 600] + hlx.strand[(ci + 1) % 600] + hlx.strand[(ci + 2) % 600];
   const comp = codon.split('').map(b => COMPLEMENTS[b]).join('');
   const snippet = CODE_SNIPPETS[ci % CODE_SNIPPETS.length];
   return { codon, comp, snippet, age: 0 };
 }
 
-// Holographic color cycling
-function holoColor(baseAngle, depth, t) {
-  const hue = (baseAngle * 30 + t * 40 + depth * 60) % 360;
-  return hue;
-}
+// ── Draw a single helix ──
+function drawHelix(hlx) {
+  const s = hlx.scale;
+  const alphaBase = Math.max(0.15, s);
+  const centerX = W * hlx.cx;
+  const centerY = H * hlx.cy;
+  const startY = centerY - (hlx.nodeCount / 2) * hlx.vSpacing;
+  const endY = startY + hlx.nodeCount * hlx.vSpacing;
+  let scanBaseIndex = 0;
 
-function hslStr(h, s, l, a) {
-  return `hsla(${h}, ${s}%, ${l}%, ${a})`;
-}
+  // Collect drawables
+  const drawables = [];
+  for (let i = 0; i < hlx.nodeCount; i++) {
+    const angle = hlx.time + i * 0.3;
+    const y = startY + i * hlx.vSpacing;
+    const x1 = centerX + Math.cos(angle) * hlx.radius;
+    const z1 = Math.sin(angle);
+    const x2 = centerX + Math.cos(angle + Math.PI) * hlx.radius;
+    const z2 = Math.sin(angle + Math.PI);
+    const base1 = hlx.strand[i % 600];
+    const base2 = COMPLEMENTS[base1];
+    const isAtScan = Math.abs(y - hlx.scanY) < 8;
+    if (isAtScan) scanBaseIndex = i;
 
-// Light source
-const light = { x: 0, y: 0 };
+    drawables.push({ type: 'bond', x1, x2, y, z: (z1 + z2) / 2, angle, isAtScan, base1, base2 });
+    drawables.push({ type: 'node', x: x1, y, z: z1, base: base1, angle, isAtScan });
+    drawables.push({ type: 'node', x: x2, y, z: z2, base: base2, angle: angle + Math.PI, isAtScan });
+  }
+  drawables.sort((a, b) => a.z - b.z);
 
-function drawHelixNode(x, y, z, base, baseAngle, isAtScan) {
-  const depthScale = (z + 1) / 2;
-  const size = 3.5 + depthScale * 4;
+  for (const d of drawables) {
+    if (d.type === 'bond') {
+      const depthScale = (d.z + 1) / 2;
+      const alpha = (0.04 + depthScale * 0.12) * alphaBase;
+      const bondHue = (holoHue(d.angle, d.z, hlx.time) + hlx.hueOffset) % 360;
 
-  const hue = holoColor(baseAngle, z, time);
-  const dx = x - light.x;
-  const dy = y - light.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const lightIntensity = Math.max(0, 1 - dist / 600) * depthScale;
-  const specular = Math.pow(lightIntensity, 3);
+      ctx.beginPath();
+      ctx.setLineDash([3, 4]);
+      ctx.moveTo(d.x1, d.y);
+      ctx.lineTo(d.x2, d.y);
 
-  const baseLightness = 45 + specular * 40;
-  const baseSat = 80 + specular * 20;
+      if (d.isAtScan) {
+        ctx.strokeStyle = hsl(bondHue, 100, 70, Math.min(1, alpha * 4));
+        ctx.lineWidth = 1.5 * s + 0.5;
+        ctx.shadowColor = hsl(bondHue, 100, 60, 0.4 * alphaBase);
+        ctx.shadowBlur = 8 * s;
+      } else {
+        ctx.strokeStyle = hsl(bondHue, 60, 50, alpha);
+        ctx.lineWidth = Math.max(0.5, s);
+        ctx.shadowBlur = 0;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
 
-  // Holographic glow - rainbow shimmer
-  if (depthScale > 0.35) {
-    const glowSize = size * (isAtScan ? 5 : 3);
-    const glow = ctx.createRadialGradient(x, y, 0, x, y, glowSize);
-    glow.addColorStop(0, hslStr(hue, 100, 70, isAtScan ? 0.25 : 0.1 * depthScale));
-    glow.addColorStop(0.5, hslStr((hue + 40) % 360, 100, 50, isAtScan ? 0.1 : 0.04 * depthScale));
-    glow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(x - glowSize, y - glowSize, glowSize * 2, glowSize * 2);
+      // Labels on front-facing bonds (only if large enough to read)
+      if (depthScale > 0.4 && s > 0.3) {
+        const mx = (d.x1 + d.x2) / 2;
+        const fontSize = Math.max(7, (8 + depthScale * 3) * s);
+        ctx.font = `${fontSize}px Courier New`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const la = d.isAtScan ? 0.9 * alphaBase : (0.1 + depthScale * 0.18) * alphaBase;
+        ctx.fillStyle = d.isAtScan
+          ? hsl(bondHue, 100, 80, la)
+          : hsl(bondHue, 50, 60, la);
+        ctx.fillText(`${d.base1}\u2013${d.base2}`, mx, d.y);
+        ctx.textAlign = 'left';
+      }
+    } else {
+      // Node
+      const depthScale = (d.z + 1) / 2;
+      const size = (3 + depthScale * 4) * s + 0.5;
+      const hue = (holoHue(d.angle, d.z, hlx.time) + hlx.hueOffset) % 360;
+
+      const dx = d.x - light.x;
+      const dy = d.y - light.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const li = Math.max(0, 1 - dist / 600) * depthScale;
+      const spec = Math.pow(li, 3);
+      const bl = 45 + spec * 40;
+      const bs = 80 + spec * 20;
+
+      // Glow
+      if (depthScale > 0.35 && s > 0.2) {
+        const gs = size * (d.isAtScan ? 5 : 3);
+        const glow = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, gs);
+        glow.addColorStop(0, hsl(hue, 100, 70, (d.isAtScan ? 0.2 : 0.08 * depthScale) * alphaBase));
+        glow.addColorStop(0.5, hsl((hue + 40) % 360, 100, 50, (d.isAtScan ? 0.08 : 0.03 * depthScale) * alphaBase));
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(d.x - gs, d.y - gs, gs * 2, gs * 2);
+      }
+
+      // Core node
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, size, 0, Math.PI * 2);
+      const grad = ctx.createRadialGradient(d.x - size * 0.3, d.y - size * 0.3, 0, d.x, d.y, size);
+      grad.addColorStop(0, hsl(hue, bs, Math.min(95, bl + 30), 0.9 * depthScale * alphaBase));
+      grad.addColorStop(0.5, hsl((hue + 20) % 360, bs, bl, 0.7 * depthScale * alphaBase));
+      grad.addColorStop(1, hsl((hue + 50) % 360, 60, bl * 0.4, 0.5 * depthScale * alphaBase));
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Specular
+      if (spec > 0.08 && s > 0.25) {
+        ctx.beginPath();
+        ctx.arc(d.x - size * 0.2, d.y - size * 0.25, size * 0.4, 0, Math.PI * 2);
+        ctx.fillStyle = hsl((hue + 180) % 360, 100, 90, spec * 0.7 * alphaBase);
+        ctx.fill();
+      }
+
+      // Scan flash
+      if (d.isAtScan) {
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, size * 3, 0, Math.PI * 2);
+        const flash = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, size * 3);
+        flash.addColorStop(0, hsl(hue, 100, 80, 0.35 * alphaBase));
+        flash.addColorStop(0.5, hsl((hue + 60) % 360, 100, 60, 0.12 * alphaBase));
+        flash.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = flash;
+        ctx.fill();
+      }
+    }
   }
 
-  // Node with holographic gradient
-  ctx.beginPath();
-  ctx.arc(x, y, size, 0, Math.PI * 2);
-  const grad = ctx.createRadialGradient(x - size * 0.3, y - size * 0.3, 0, x, y, size);
-  grad.addColorStop(0, hslStr(hue, baseSat, Math.min(95, baseLightness + 30), 0.9 * depthScale));
-  grad.addColorStop(0.5, hslStr((hue + 20) % 360, baseSat, baseLightness, 0.7 * depthScale));
-  grad.addColorStop(1, hslStr((hue + 50) % 360, 60, baseLightness * 0.4, 0.5 * depthScale));
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Iridescent specular highlight
-  if (specular > 0.08) {
+  // Backbone curves
+  for (let strand = 0; strand < 2; strand++) {
     ctx.beginPath();
-    ctx.arc(x - size * 0.2, y - size * 0.25, size * 0.4, 0, Math.PI * 2);
-    ctx.fillStyle = hslStr((hue + 180) % 360, 100, 90, specular * 0.7);
-    ctx.fill();
+    for (let i = 0; i < hlx.nodeCount; i++) {
+      const angle = hlx.time + i * 0.3 + strand * Math.PI;
+      const x = centerX + Math.cos(angle) * hlx.radius;
+      const y = startY + i * hlx.vSpacing;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    const bHue = (hlx.time * 30 + strand * 180 + hlx.hueOffset) % 360;
+    ctx.strokeStyle = hsl(bHue, 70, 50, 0.05 * alphaBase);
+    ctx.lineWidth = Math.max(0.5, 2 * s);
+    ctx.stroke();
   }
 
-  // Scan flash
-  if (isAtScan) {
-    ctx.beginPath();
-    ctx.arc(x, y, size * 3, 0, Math.PI * 2);
-    const flash = ctx.createRadialGradient(x, y, 0, x, y, size * 3);
-    flash.addColorStop(0, hslStr(hue, 100, 80, 0.4));
-    flash.addColorStop(0.5, hslStr((hue + 60) % 360, 100, 60, 0.15));
-    flash.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = flash;
-    ctx.fill();
+  // Scan line
+  hlx.scanY += hlx.scanSpeed * hlx.scanDir;
+  if (hlx.scanY > endY + 15) hlx.scanDir = -1;
+  else if (hlx.scanY < startY - 15) hlx.scanDir = 1;
+
+  const sHue = (hlx.time * 60 + hlx.hueOffset) % 360;
+  const scanGrad = ctx.createLinearGradient(centerX - hlx.radius - 40, 0, centerX + hlx.radius + 40, 0);
+  scanGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  scanGrad.addColorStop(0.15, hsl(sHue, 100, 65, 0.4 * alphaBase));
+  scanGrad.addColorStop(0.5, hsl((sHue + 40) % 360, 100, 80, 0.7 * alphaBase));
+  scanGrad.addColorStop(0.85, hsl((sHue + 80) % 360, 100, 65, 0.4 * alphaBase));
+  scanGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = scanGrad;
+  ctx.fillRect(centerX - hlx.radius - 40, hlx.scanY - 1, hlx.radius * 2 + 80, 2);
+
+  // Scan glow
+  const scanGlow = ctx.createLinearGradient(0, hlx.scanY - 15, 0, hlx.scanY + 15);
+  scanGlow.addColorStop(0, 'rgba(0,0,0,0)');
+  scanGlow.addColorStop(0.5, hsl(sHue, 100, 60, 0.04 * alphaBase));
+  scanGlow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = scanGlow;
+  ctx.fillRect(centerX - hlx.radius - 40, hlx.scanY - 15, hlx.radius * 2 + 80, 30);
+
+  // Cycle code lines
+  hlx.codeTimer++;
+  if (hlx.codeTimer >= hlx.codeInterval) {
+    hlx.codeTimer = 0;
+    const line = getCodeLine(hlx, scanBaseIndex + Math.floor(Math.random() * 12));
+    hlx.codeLines.push(line);
+    if (hlx.codeLines.length > 12) hlx.codeLines = hlx.codeLines.slice(-9);
   }
+  for (const l of hlx.codeLines) l.age++;
+
+  // Floating code window
+  drawCodeWindow(hlx, centerX, hlx.scanY);
+
+  hlx.time += hlx.rotSpeed;
 }
 
-function drawCodeWindow(anchorX, anchorY) {
-  const lineH = 18;
-  const padX = 14;
-  const padY = 10;
-  const boxW = 310;
-  const boxH = padY * 2 + codeWindowLines * lineH + 4;
+function drawCodeWindow(hlx, anchorX, anchorY) {
+  const s = hlx.scale;
+  const alphaBase = Math.max(0.15, s);
+  const lines = hlx.codeLines.slice(-7);
+  if (lines.length === 0) return;
 
-  // Position the floating window to the right of the helix
-  let wx = anchorX + helixRadius + 50;
+  const lineH = Math.max(12, 18 * s);
+  const padX = Math.max(8, 14 * s);
+  const padY = Math.max(6, 10 * s);
+  const fontSize = Math.max(8, 11 * s);
+  const boxW = Math.max(160, 310 * s);
+  const boxH = padY * 2 + 7 * lineH + 4;
+
+  // Position to the right (or left) of the helix
+  let wx = anchorX + hlx.radius + Math.max(20, 40 * s);
   let wy = anchorY - boxH / 2;
 
-  // Keep on screen
-  if (wx + boxW > W - 10) wx = anchorX - helixRadius - boxW - 50;
-  if (wy < 10) wy = 10;
-  if (wy + boxH > H - 10) wy = H - boxH - 10;
+  if (wx + boxW > W - 5) wx = anchorX - hlx.radius - boxW - Math.max(20, 40 * s);
+  if (wy < 5) wy = 5;
+  if (wy + boxH > H - 5) wy = H - boxH - 5;
 
-  // Holographic panel background
-  ctx.save();
+  const borderHue = (hlx.time * 50 + hlx.hueOffset) % 360;
 
   // Outer glow
-  const glowGrad = ctx.createRadialGradient(wx + boxW / 2, wy + boxH / 2, boxH * 0.3,
-    wx + boxW / 2, wy + boxH / 2, boxH);
-  glowGrad.addColorStop(0, `rgba(0, 255, 200, 0.04)`);
+  const glowGrad = ctx.createRadialGradient(wx + boxW / 2, wy + boxH / 2, boxH * 0.2, wx + boxW / 2, wy + boxH / 2, boxH * 0.8);
+  glowGrad.addColorStop(0, hsl(borderHue, 80, 50, 0.035 * alphaBase));
   glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = glowGrad;
-  ctx.fillRect(wx - 40, wy - 40, boxW + 80, boxH + 80);
+  ctx.fillRect(wx - 30, wy - 30, boxW + 60, boxH + 60);
 
-  // Panel body - translucent holographic
-  ctx.globalAlpha = 0.85;
+  // Panel body
+  ctx.save();
+  ctx.globalAlpha = 0.8 * alphaBase;
   const panelGrad = ctx.createLinearGradient(wx, wy, wx + boxW, wy + boxH);
-  panelGrad.addColorStop(0, 'rgba(0, 10, 20, 0.75)');
-  panelGrad.addColorStop(0.5, 'rgba(0, 15, 30, 0.7)');
-  panelGrad.addColorStop(1, 'rgba(5, 10, 25, 0.75)');
+  panelGrad.addColorStop(0, 'rgba(0, 10, 20, 0.8)');
+  panelGrad.addColorStop(0.5, 'rgba(0, 15, 30, 0.72)');
+  panelGrad.addColorStop(1, 'rgba(5, 10, 25, 0.8)');
   ctx.fillStyle = panelGrad;
 
   // Rounded rect
-  const r = 6;
+  const r = Math.max(3, 6 * s);
   ctx.beginPath();
   ctx.moveTo(wx + r, wy);
   ctx.lineTo(wx + boxW - r, wy);
@@ -236,86 +361,87 @@ function drawCodeWindow(anchorX, anchorY) {
   ctx.fill();
   ctx.globalAlpha = 1;
 
-  // Holographic border - shifting rainbow
-  const borderHue = (time * 50) % 360;
-  ctx.strokeStyle = hslStr(borderHue, 80, 55, 0.5);
-  ctx.lineWidth = 1;
+  // Holographic border
+  ctx.strokeStyle = hsl(borderHue, 80, 55, 0.45 * alphaBase);
+  ctx.lineWidth = Math.max(0.5, s);
   ctx.stroke();
 
-  // Second inner border for holographic depth
-  ctx.beginPath();
-  ctx.moveTo(wx + r + 2, wy + 2);
-  ctx.lineTo(wx + boxW - r - 2, wy + 2);
-  ctx.quadraticCurveTo(wx + boxW - 2, wy + 2, wx + boxW - 2, wy + r + 2);
-  ctx.lineTo(wx + boxW - 2, wy + boxH - r - 2);
-  ctx.quadraticCurveTo(wx + boxW - 2, wy + boxH - 2, wx + boxW - r - 2, wy + boxH - 2);
-  ctx.lineTo(wx + r + 2, wy + boxH - 2);
-  ctx.quadraticCurveTo(wx + 2, wy + boxH - 2, wx + 2, wy + boxH - r - 2);
-  ctx.lineTo(wx + 2, wy + r + 2);
-  ctx.quadraticCurveTo(wx + 2, wy + 2, wx + r + 2, wy + 2);
-  ctx.closePath();
-  ctx.strokeStyle = hslStr((borderHue + 120) % 360, 70, 50, 0.15);
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
+  // Inner border
+  if (s > 0.3) {
+    ctx.beginPath();
+    const m = 2;
+    ctx.moveTo(wx + r + m, wy + m);
+    ctx.lineTo(wx + boxW - r - m, wy + m);
+    ctx.quadraticCurveTo(wx + boxW - m, wy + m, wx + boxW - m, wy + r + m);
+    ctx.lineTo(wx + boxW - m, wy + boxH - r - m);
+    ctx.quadraticCurveTo(wx + boxW - m, wy + boxH - m, wx + boxW - r - m, wy + boxH - m);
+    ctx.lineTo(wx + r + m, wy + boxH - m);
+    ctx.quadraticCurveTo(wx + m, wy + boxH - m, wx + m, wy + boxH - r - m);
+    ctx.lineTo(wx + m, wy + r + m);
+    ctx.quadraticCurveTo(wx + m, wy + m, wx + r + m, wy + m);
+    ctx.closePath();
+    ctx.strokeStyle = hsl((borderHue + 120) % 360, 70, 50, 0.12 * alphaBase);
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
 
-  // Scan line shimmer across the panel
-  const shimmerY = wy + ((time * 30) % boxH);
+  // Shimmer line
+  const shimmerY = wy + ((hlx.time * 30) % boxH);
   if (shimmerY > wy && shimmerY < wy + boxH) {
-    const shimGrad = ctx.createLinearGradient(wx, shimmerY - 1, wx, shimmerY + 1);
-    shimGrad.addColorStop(0, 'rgba(0,0,0,0)');
-    shimGrad.addColorStop(0.5, hslStr((borderHue + 60) % 360, 100, 70, 0.12));
-    shimGrad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = shimGrad;
+    const shim = ctx.createLinearGradient(wx, shimmerY - 1, wx, shimmerY + 1);
+    shim.addColorStop(0, 'rgba(0,0,0,0)');
+    shim.addColorStop(0.5, hsl((borderHue + 60) % 360, 100, 70, 0.1 * alphaBase));
+    shim.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = shim;
     ctx.fillRect(wx, shimmerY - 1, boxW, 2);
   }
 
-  // Draw connecting line from scan point to window
+  // Connecting dashed line
   ctx.beginPath();
   ctx.setLineDash([4, 6]);
-  const connStartX = anchorX + (wx > anchorX ? helixRadius + 10 : -helixRadius - 10);
-  const connEndX = wx > anchorX ? wx : wx + boxW;
-  ctx.moveTo(connStartX, anchorY);
-  ctx.lineTo(connEndX, anchorY);
-  ctx.strokeStyle = hslStr(borderHue, 80, 60, 0.3);
-  ctx.lineWidth = 1;
+  const connX1 = anchorX + (wx > anchorX ? hlx.radius + 8 : -hlx.radius - 8);
+  const connX2 = wx > anchorX ? wx : wx + boxW;
+  ctx.moveTo(connX1, anchorY);
+  ctx.lineTo(connX2, anchorY);
+  ctx.strokeStyle = hsl(borderHue, 80, 60, 0.25 * alphaBase);
+  ctx.lineWidth = Math.max(0.5, s);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Render code lines
+  // Code text
   ctx.textBaseline = 'top';
-  const visibleLines = codeLines.slice(-codeWindowLines);
-
-  for (let i = 0; i < visibleLines.length; i++) {
-    const line = visibleLines[i];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const ly = wy + padY + i * lineH;
-    const lineAge = line.age;
-    const fadeIn = Math.min(1, lineAge / 20);
+    const fadeIn = Math.min(1, line.age / 20);
+    const cHue = (hlx.time * 50 + hlx.hueOffset + i * 30) % 360;
 
-    // DNA codon part
-    const codonHue = (time * 50 + i * 30) % 360;
-    ctx.font = '11px Courier New';
-    ctx.fillStyle = hslStr(codonHue, 70, 55, 0.6 * fadeIn);
+    // Codon
+    ctx.font = `${fontSize}px Courier New`;
+    ctx.fillStyle = hsl(cHue, 70, 55, 0.55 * fadeIn * alphaBase);
     ctx.fillText(`${line.codon}|${line.comp}`, wx + padX, ly);
 
     // Arrow
-    ctx.fillStyle = hslStr(borderHue, 60, 50, 0.3 * fadeIn);
-    ctx.fillText(' \u2192 ', wx + padX + 60, ly);
+    const codonW = ctx.measureText(`${line.codon}|${line.comp}`).width;
+    ctx.fillStyle = hsl(borderHue, 60, 50, 0.3 * fadeIn * alphaBase);
+    ctx.fillText(' \u2192 ', wx + padX + codonW, ly);
+    const arrowW = ctx.measureText(' \u2192 ').width;
 
-    // Code part - keywords in different color
-    const snippet = line.snippet;
-    const codeX = wx + padX + 90;
-    if (snippet.kw) {
-      ctx.font = 'bold 11px Courier New';
-      ctx.fillStyle = hslStr((codonHue + 180) % 360, 90, 65, 0.9 * fadeIn);
-      ctx.fillText(snippet.kw, codeX, ly);
-      const kwWidth = ctx.measureText(snippet.kw).width;
-      ctx.font = '11px Courier New';
-      ctx.fillStyle = hslStr(codonHue, 50, 70, 0.85 * fadeIn);
-      ctx.fillText(snippet.code.slice(snippet.kw.length), codeX + kwWidth, ly);
+    // Code
+    const codeX = wx + padX + codonW + arrowW;
+    const sn = line.snippet;
+    if (sn.kw && s > 0.3) {
+      ctx.font = `bold ${fontSize}px Courier New`;
+      ctx.fillStyle = hsl((cHue + 180) % 360, 90, 65, 0.85 * fadeIn * alphaBase);
+      ctx.fillText(sn.kw, codeX, ly);
+      const kwW = ctx.measureText(sn.kw).width;
+      ctx.font = `${fontSize}px Courier New`;
+      ctx.fillStyle = hsl(cHue, 50, 70, 0.8 * fadeIn * alphaBase);
+      ctx.fillText(sn.code.slice(sn.kw.length), codeX + kwW, ly);
     } else {
-      ctx.font = '11px Courier New';
-      ctx.fillStyle = hslStr(codonHue, 50, 70, 0.85 * fadeIn);
-      ctx.fillText(snippet.code, codeX, ly);
+      ctx.font = `${fontSize}px Courier New`;
+      ctx.fillStyle = hsl(cHue, 50, 70, 0.8 * fadeIn * alphaBase);
+      ctx.fillText(sn.code, codeX, ly);
     }
   }
 
@@ -323,14 +449,14 @@ function drawCodeWindow(anchorX, anchorY) {
 }
 
 function render() {
-  // Fade trail for holographic ghosting
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+  // Fade with slight trail for holographic ghosting
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.16)';
   ctx.fillRect(0, 0, W, H);
 
-  // Dark background with subtle color
-  const bgGrad = ctx.createRadialGradient(W * 0.45, H * 0.5, 0, W * 0.45, H * 0.5, H);
-  bgGrad.addColorStop(0, 'rgba(0, 8, 20, 0.06)');
-  bgGrad.addColorStop(1, 'rgba(0, 0, 0, 0.1)');
+  // Subtle background radiance
+  const bgGrad = ctx.createRadialGradient(W * 0.5, H * 0.5, 0, W * 0.5, H * 0.5, H * 0.9);
+  bgGrad.addColorStop(0, 'rgba(0, 6, 18, 0.04)');
+  bgGrad.addColorStop(1, 'rgba(0, 0, 0, 0.06)');
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
 
@@ -338,172 +464,38 @@ function render() {
   for (const p of particles) {
     p.x += p.vx;
     p.y += p.vy;
-    if (p.x < 0) p.x = W;
-    if (p.x > W) p.x = 0;
-    if (p.y < 0) p.y = H;
-    if (p.y > H) p.y = 0;
-    p.alpha += (Math.random() - 0.5) * 0.015;
-    p.alpha = Math.max(0.03, Math.min(0.2, p.alpha));
-    const pH = (time * 40 + p.x * 0.2) % 360;
+    if (p.x < 0) p.x = W; if (p.x > W) p.x = 0;
+    if (p.y < 0) p.y = H; if (p.y > H) p.y = 0;
+    p.alpha += (Math.random() - 0.5) * 0.012;
+    p.alpha = Math.max(0.02, Math.min(0.18, p.alpha));
+    const pH = (globalTime * 40 + p.x * 0.15) % 360;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    ctx.fillStyle = hslStr(pH, 80, 60, p.alpha);
+    ctx.fillStyle = hsl(pH, 80, 60, p.alpha);
     ctx.fill();
   }
 
-  const centerX = W / 2;
-  const centerY = H / 2;
-  const startY = centerY - (nucleotidesVisible / 2) * verticalSpacing;
-
-  // Collect drawables for depth sorting
-  const drawables = [];
-  let scanBaseIndex = 0;
-
-  for (let i = 0; i < nucleotidesVisible; i++) {
-    const angle = time + i * 0.3;
-    const y = startY + i * verticalSpacing;
-
-    const x1 = centerX + Math.cos(angle) * helixRadius;
-    const z1 = Math.sin(angle);
-    const x2 = centerX + Math.cos(angle + Math.PI) * helixRadius;
-    const z2 = Math.sin(angle + Math.PI);
-
-    const base1 = strand[i % strandLength];
-    const base2 = COMPLEMENTS[base1];
-    const isAtScan = Math.abs(y - scanY) < 10;
-
-    if (isAtScan) scanBaseIndex = i;
-
-    drawables.push({ type: 'bond', x1, x2, y, z: (z1 + z2) / 2, angle, isAtScan });
-    drawables.push({ type: 'node', x: x1, y, z: z1, base: base1, angle, isAtScan });
-    drawables.push({ type: 'node', x: x2, y, z: z2, base: base2, angle: angle + Math.PI, isAtScan });
-  }
-
-  drawables.sort((a, b) => a.z - b.z);
-
-  for (const d of drawables) {
-    if (d.type === 'bond') {
-      const depthScale = (d.z + 1) / 2;
-      const alpha = 0.04 + depthScale * 0.12;
-      const bondHue = holoColor(d.angle, d.z, time);
-
-      ctx.beginPath();
-      ctx.setLineDash([3, 4]);
-      ctx.moveTo(d.x1, d.y);
-      ctx.lineTo(d.x2, d.y);
-
-      if (d.isAtScan) {
-        ctx.strokeStyle = hslStr(bondHue, 100, 70, alpha * 4);
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = hslStr(bondHue, 100, 60, 0.4);
-        ctx.shadowBlur = 10;
-      } else {
-        ctx.strokeStyle = hslStr(bondHue, 60, 50, alpha);
-        ctx.lineWidth = 1;
-        ctx.shadowBlur = 0;
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.shadowBlur = 0;
-
-      // Base pair labels
-      if (depthScale > 0.4) {
-        const mx = (d.x1 + d.x2) / 2;
-        const bi = Math.round((d.y - startY) / verticalSpacing);
-        const b1 = strand[bi % strandLength];
-        const b2 = COMPLEMENTS[b1];
-        ctx.font = `${8 + depthScale * 3}px Courier New`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const labelAlpha = d.isAtScan ? 0.9 : 0.12 + depthScale * 0.2;
-        ctx.fillStyle = d.isAtScan
-          ? hslStr(bondHue, 100, 80, labelAlpha)
-          : hslStr(bondHue, 50, 60, labelAlpha);
-        ctx.fillText(`${b1}\u2013${b2}`, mx, d.y);
-        ctx.textAlign = 'left';
-      }
-    } else {
-      drawHelixNode(d.x, d.y, d.z, d.base, d.angle, d.isAtScan);
-    }
-  }
-
-  // Phosphate backbone with holographic colors
-  for (let s = 0; s < 2; s++) {
-    ctx.beginPath();
-    for (let i = 0; i < nucleotidesVisible; i++) {
-      const angle = time + i * 0.3 + s * Math.PI;
-      const x = centerX + Math.cos(angle) * helixRadius;
-      const y = startY + i * verticalSpacing;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    const boneHue = (time * 30 + s * 180) % 360;
-    ctx.strokeStyle = hslStr(boneHue, 70, 50, 0.06);
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-
-  // Scan line
-  const scanStartY = startY;
-  const scanEndY = startY + nucleotidesVisible * verticalSpacing;
-  scanY += scanSpeed * scanDirection;
-  if (scanY > scanEndY + 20) scanDirection = -1;
-  else if (scanY < scanStartY - 20) scanDirection = 1;
-
-  // Draw holographic scan line on canvas
-  const scanHue = (time * 60) % 360;
-  const scanGrad = ctx.createLinearGradient(centerX - helixRadius - 60, 0, centerX + helixRadius + 60, 0);
-  scanGrad.addColorStop(0, 'rgba(0,0,0,0)');
-  scanGrad.addColorStop(0.2, hslStr(scanHue, 100, 65, 0.5));
-  scanGrad.addColorStop(0.5, hslStr((scanHue + 40) % 360, 100, 80, 0.8));
-  scanGrad.addColorStop(0.8, hslStr((scanHue + 80) % 360, 100, 65, 0.5));
-  scanGrad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = scanGrad;
-  ctx.fillRect(centerX - helixRadius - 60, scanY - 1, helixRadius * 2 + 120, 2);
-
-  // Scan line glow
-  const scanGlow = ctx.createLinearGradient(0, scanY - 20, 0, scanY + 20);
-  scanGlow.addColorStop(0, 'rgba(0,0,0,0)');
-  scanGlow.addColorStop(0.5, hslStr(scanHue, 100, 60, 0.06));
-  scanGlow.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = scanGlow;
-  ctx.fillRect(centerX - helixRadius - 60, scanY - 20, helixRadius * 2 + 120, 40);
-
-  // Constantly cycle code lines
-  codeScrollTimer++;
-  if (codeScrollTimer >= codeScrollInterval) {
-    codeScrollTimer = 0;
-    const newLine = getNextCodeLine(scanBaseIndex + Math.floor(Math.random() * 12));
-    codeLines.push(newLine);
-    if (codeLines.length > codeWindowLines + 5) {
-      codeLines = codeLines.slice(-codeWindowLines - 2);
-    }
-  }
-
-  // Age all lines
-  for (const line of codeLines) line.age++;
-
-  // Draw floating code window at scan line position
-  drawCodeWindow(centerX, scanY);
-
   // Update light
-  light.x = W * 0.35 + Math.sin(time * 0.5) * 150;
-  light.y = H * 0.2 + Math.cos(time * 0.3) * 100;
+  light.x = W * 0.35 + Math.sin(globalTime * 0.012 * 0.5 / 0.012) * 150;
+  light.y = H * 0.2 + Math.cos(globalTime * 0.012 * 0.3 / 0.012) * 100;
 
-  time += rotationSpeed;
+  // Draw helices back-to-front (deepest first)
+  const sorted = [...helices].sort((a, b) => b.depth - a.depth);
+  for (const hlx of sorted) {
+    drawHelix(hlx);
+  }
+
+  globalTime += 1;
   requestAnimationFrame(render);
 }
 
-// Hide the HTML scan line elements (all done on canvas now)
-document.getElementById('helix').style.position = 'fixed';
-document.getElementById('helix').style.top = '0';
-document.getElementById('helix').style.left = '0';
+// Initialize scan positions
+for (const hlx of helices) {
+  hlx.scanY = H * hlx.cy;
+}
 
-// Init
 ctx.fillStyle = '#000';
 ctx.fillRect(0, 0, W, H);
-scanY = H * 0.5;
-
 render();
 </script>
 </body>
